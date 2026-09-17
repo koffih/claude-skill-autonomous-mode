@@ -43,13 +43,21 @@ for arg in "$@"; do
   esac
 done
 
+# Work on the real path, symlinks resolved: another account cannot go through
+# /root to reach /root/.claude -> /opt/<project>/.claude, but can reach /opt.
+probe="$BASE"
+rest=""
+while [ ! -e "$probe" ] && [ "$probe" != / ]; do
+  rest="/$(basename "$probe")$rest"
+  probe="$(dirname "$probe")"
+done
+real="$(readlink -f "$probe")"
+BASE="${real%/}$rest"
 TARGET="$BASE/$NAME"
 
-# Owner of the skills folder, or of its closest existing parent, symlinks followed.
-probe="$BASE"
-while [ ! -e "$probe" ] && [ "$probe" != / ]; do probe="$(dirname "$probe")"; done
-OWNER="$(stat -L -c %U "$probe")"
-GROUP="$(stat -L -c %G "$probe")"
+# Owner of the skills folder, or of its closest existing parent.
+OWNER="$(stat -c %U "$real")"
+GROUP="$(stat -c %G "$real")"
 
 AS=""
 if [ "$(id -u)" = 0 ] && [ "$OWNER" != root ]; then
@@ -114,8 +122,15 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
     echo "Move or remove it, then run this again." >&2
     exit 1
   fi
-  if ! as_owner git -C "$TARGET" diff --quiet || ! as_owner git -C "$TARGET" diff --cached --quiet; then
-    echo "local changes in $TARGET: not updating, to avoid losing them." >&2
+  if as_owner git -C "$TARGET" diff --quiet && as_owner git -C "$TARGET" diff --cached --quiet; then
+    :
+  else
+    rc=$?
+    if [ "$rc" = 1 ]; then
+      echo "local changes in $TARGET: not updating, to avoid losing them." >&2
+    else
+      echo "git could not read $TARGET (see the message above)." >&2
+    fi
     exit 1
   fi
   as_owner git -C "$TARGET" pull --ff-only --quiet
