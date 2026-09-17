@@ -10,6 +10,11 @@
 #
 # The skill is a git clone, so running this again updates it (fast-forward only).
 # Set SKILLS_DIR to install somewhere else than ~/.claude/skills.
+#
+# Shared folders: when the skills folder belongs to another account (for
+# example /opt/<project>/.claude used by both root and dev), root works in it
+# as that account. Root never runs git in a tree another user can write to,
+# and the owner keeps managing its own skills.
 set -euo pipefail
 
 NAME="autonomous-mode"
@@ -17,6 +22,7 @@ REPO="koffih/claude-skill-autonomous-mode"
 URL="https://github.com/$REPO.git"
 
 BASE="${SKILLS_DIR:-$HOME/.claude/skills}"
+MODE="install"
 
 usage() {
   cat <<USAGE
@@ -27,7 +33,6 @@ Install or update the $NAME skill for Claude Code.
   install.sh --uninstall  remove it
 USAGE
 }
-MODE="install"
 
 for arg in "$@"; do
   case "$arg" in
@@ -40,11 +45,52 @@ done
 
 TARGET="$BASE/$NAME"
 
-# True only for a real clone of this repository, so we never touch anything else.
+# Owner of the skills folder, or of its closest existing parent, symlinks followed.
+probe="$BASE"
+while [ ! -e "$probe" ] && [ "$probe" != / ]; do probe="$(dirname "$probe")"; done
+OWNER="$(stat -L -c %U "$probe")"
+GROUP="$(stat -L -c %G "$probe")"
+
+AS=""
+if [ "$(id -u)" = 0 ] && [ "$OWNER" != root ]; then
+  command -v runuser >/dev/null 2>&1 || { echo "runuser is required to install into $BASE, owned by $OWNER." >&2; exit 1; }
+  AS="$OWNER"
+fi
+
+# Run a command as the owner of the skills folder when root works in someone else's folder.
+as_owner() {
+  if [ -n "$AS" ]; then
+    runuser -u "$AS" -- env HOME="$(getent passwd "$AS" | cut -d: -f6)" "$@"
+  else
+    "$@"
+  fi
+}
+
+# Read the origin straight from the file: no git command runs inside a tree we may not own.
 is_our_clone() {
   [ -d "$TARGET/.git" ] && [ ! -L "$TARGET" ] &&
-    git -C "$TARGET" remote get-url origin 2>/dev/null | grep -qi "github.com[:/]$REPO\(\.git\)\{0,1\}$"
+    git -C / config --file "$TARGET/.git/config" --get remote.origin.url 2>/dev/null |
+      grep -qi "github.com[:/]$REPO\(\.git\)\{0,1\}$"
 }
+
+# A clone root left in another account's folder is handed over to that account.
+if [ -n "$AS" ] && is_our_clone && [ "$(stat -c %U "$TARGET")" = root ]; then
+  chown -R "$OWNER:$GROUP" -- "$TARGET"
+  echo "handed:    $TARGET now belongs to $OWNER"
+fi
+
+# Someone else manages this folder (shared by several accounts).
+if [ "$(id -u)" != 0 ] && [ -d "$TARGET" ] && [ ! -L "$TARGET" ] && [ "$(stat -c %u "$TARGET")" != "$(id -u)" ]; then
+  manager="$(stat -c %U "$TARGET")"
+  if [ ! -r "$TARGET/.git/config" ] || [ ! -r "$TARGET/SKILL.md" ]; then
+    echo "$TARGET belongs to $manager and is not readable by $(id -un): run this installer once as root to hand it over." >&2
+    exit 1
+  fi
+  if is_our_clone; then
+    echo "managed:   $TARGET is kept up to date by $manager (shared folder)"
+    exit 0
+  fi
+fi
 
 if [ "$MODE" = uninstall ]; then
   if [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ]; then
@@ -55,7 +101,7 @@ if [ "$MODE" = uninstall ]; then
     echo "refusing to remove $TARGET: it is not a clone of $REPO. Remove it by hand if intended." >&2
     exit 1
   fi
-  rm -rf -- "$TARGET"
+  as_owner rm -rf -- "$TARGET"
   echo "removed: $TARGET"
   exit 0
 fi
@@ -68,17 +114,19 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
     echo "Move or remove it, then run this again." >&2
     exit 1
   fi
-  if ! git -C "$TARGET" diff --quiet || ! git -C "$TARGET" diff --cached --quiet; then
+  if ! as_owner git -C "$TARGET" diff --quiet || ! as_owner git -C "$TARGET" diff --cached --quiet; then
     echo "local changes in $TARGET: not updating, to avoid losing them." >&2
     exit 1
   fi
-  git -C "$TARGET" pull --ff-only --quiet
-  echo "updated:   $TARGET ($(git -C "$TARGET" rev-parse --short HEAD))"
+  as_owner git -C "$TARGET" pull --ff-only --quiet
+  echo "updated:   $TARGET ($(as_owner git -C "$TARGET" rev-parse --short HEAD))"
 else
-  mkdir -p "$BASE"
-  git clone --quiet --depth 1 "$URL" "$TARGET"
-  echo "installed: $TARGET ($(git -C "$TARGET" rev-parse --short HEAD))"
+  as_owner mkdir -p "$BASE"
+  as_owner git clone --quiet --depth 1 "$URL" "$TARGET"
+  echo "installed: $TARGET ($(as_owner git -C "$TARGET" rev-parse --short HEAD))"
 fi
+
+[ -n "$AS" ] && echo "as:        $AS, owner of $BASE"
 
 # Verify instead of promising.
 if grep -q "^name: $NAME$" "$TARGET/SKILL.md" 2>/dev/null; then
