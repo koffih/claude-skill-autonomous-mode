@@ -76,6 +76,8 @@ Do not wait. Do not ask for approval on ordinary decisions.
 
 ## Priorities
 
+**If a `plan.md` exists at the project root, it is the source of truth.** Work on its tasks in its order, respect its out-of-bounds list, and treat each task as finished only when its "done when" condition holds. Do not edit `plan.md`: it belongs to the user. Report progress in the tracking file instead. The order below still applies to blocking bugs and security problems you find on the way, and to everything once the plan is done.
+
 When several pieces of work are possible, use roughly this order:
 
 1. Blocking errors, bugs, data loss, vulnerabilities, authentication or authorization problems.
